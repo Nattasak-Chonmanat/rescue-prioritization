@@ -1,0 +1,190 @@
+{
+    "Comment": "Rescue Request Prioritization Pipeline",
+    "StartAt": "Process Messages",
+    "QueryLanguage": "JSONata",
+    "States": {
+        "Process Messages": {
+            "Type": "Map",
+            "Items": "{% $states.input %}",
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "INLINE"
+                },
+                "StartAt": "Event Handler",
+                "States": {
+                    "Event Handler": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Output": "{% $states.result.Payload %}",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:eventHandler:$LATEST",
+                            "Payload": "{% $states.input %}"
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": ["States.ALL"],
+                                "Next": "Send To Dead Letter Queue",
+                                "Output": "{% { 'error': $states.input, 'stage': 'EventHandler' } %}"
+                            }
+                        ],
+                        "Next": "Check Event Type"
+                    },
+                    "Check Event Type": {
+                        "Type": "Choice",
+                        "Choices": [
+                            {
+                                "Condition": "{% $states.input.header.eventType = 'rescue-request.created' %}",
+                                "Next": "Create Event Handler"
+                            },
+                            {
+                                "Condition": "{% $states.input.header.eventType = 'rescue-request.citizen-updated' %}",
+                                "Next": "Update Event Handler"
+                            }
+                        ]
+                    },
+                    "Create Event Handler": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Output": "{% $states.result.Payload %}",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:createEventHandler:$LATEST",
+                            "Payload": "{% $states.input %}"
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Next": "Check Duplicate"
+                    },
+                    "Update Event Handler": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Output": "{% $states.result.Payload %}",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:updateEventHandler:$LATEST",
+                            "Payload": "{% $states.input %}"
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": ["States.ALL"],
+                                "Next": "Send To Dead Letter Queue",
+                                "Output": "{% { 'error': $states.input, 'stage': 'UpdateEventHandler' } %}"
+                            }
+                        ],
+                        "Next": "Evaluate Worker"
+                    },
+                    "Check Duplicate": {
+                        "Type": "Choice",
+                        "Choices": [
+                            {
+                                "Condition": "{% $states.input.duplicate = true %}",
+                                "Next": "Duplicate End"
+                            },
+                            {
+                                "Condition": "{% $states.input.duplicate = false %}",
+                                "Next": "Evaluate Worker"
+                            }
+                        ]
+                    },
+                    "Duplicate End": {
+                        "Type": "Succeed"
+                    },
+                    "Evaluate Worker": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:evaluateWorker:$LATEST",
+                            "Payload": "{% $states.input %}"
+                        },
+                        "Output": "{% $states.result.Payload %}",
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": ["States.ALL"],
+                                "Next": "Send To Dead Letter Queue",
+                                "Output": "{% { 'error': $states.input, 'stage': 'EvaluateWorker' } %}"
+                            }
+                        ],
+                        "Next": "Publish Evaluated Event"
+                    },
+                    "Publish Evaluated Event": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::sns:publish",
+                        "Arguments": {
+                            "Message": "{% $states.input %}",
+                            "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-prioritization-events-v1"
+                        },
+                        "Next": "Success"
+                    },
+                    "Success": {
+                        "Type": "Succeed"
+                    },
+                    "Send To Dead Letter Queue": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::sqs:sendMessage",
+                        "Arguments": {
+                            "MessageBody": "{% $states.input %}",
+                            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/955468203539/rescue-request-created-dlq"
+                        },
+                        "Next": "Fail"
+                    },
+                    "Fail": {
+                        "Type": "Fail"
+                    }
+                }
+            },
+            "End": true
+        }
+    }
+}
