@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 import uuid
@@ -8,16 +9,36 @@ from decimal import Decimal, InvalidOperation
 import boto3
 from boto3.dynamodb.conditions import Key
 from google import genai
+from google.genai import types
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("prioritization_records")
 
 PRIORITY_LEVELS = ["LOW", "NORMAL", "HIGH", "CRITICAL"]
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"],
+    http_options=types.HttpOptions(
+        timeout=10_000  # 10 seconds 
+    )
+)
+
+def log(level, event_name, trace_id, **kwargs):
+    entry = {
+        "level": level,
+        "event": event_name,
+        "traceId": trace_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **kwargs
+    }
+    log_fn = getattr(logger, level.lower(), logger.info)
+    log_fn(json.dumps(entry, default=str))
 
 
-def evaluate_with_ai(payload):
+def evaluate_with_ai(payload, trace_id):
     prompt = f"""
     You are an emergency rescue prioritization system.
     You MUST return valid JSON only. No markdown, no explanation outside JSON.
@@ -37,6 +58,10 @@ def evaluate_with_ai(payload):
     - Request Type: {payload.get("request_type")}
     """
 
+    log("INFO", "AI_EVALUATION_STARTED", trace_id,
+        model="gemma-3-27b-it"
+    )
+
     response = client.models.generate_content(
         model="gemma-3-27b-it",
         contents=prompt
@@ -52,19 +77,31 @@ def evaluate_with_ai(payload):
     result = json.loads(text)
 
     if result["priority_level"] not in PRIORITY_LEVELS:
-        print(f"Invalid priority_level from model: {result['priority_level']}")
+        log("ERROR", "AI_INVALID_PRIORITY_LEVEL", trace_id,
+            priorityLevel=result["priority_level"]
+        )
         raise ValueError(f"Invalid priority_level from model: {result['priority_level']}")
+
     try:
         Decimal(str(result["priority_score"]))
     except InvalidOperation:
-        print(f"Invalid priority_score from model: {result['priority_score']}")
+        log("ERROR", "AI_INVALID_PRIORITY_SCORE", trace_id,
+            priorityScore=result["priority_score"]
+        )
         raise ValueError(f"Invalid priority_score from model: {result['priority_score']}")
+
+    log("INFO", "AI_EVALUATION_COMPLETED", trace_id,
+        priorityLevel=result["priority_level"],
+        priorityScore=result["priority_score"]
+    )
 
     return result, "gemma-3-27b-it"
 
 
-def evaluate_with_fallback(payload):
-    print("Using fallback random evaluation")
+def evaluate_with_fallback(trace_id):
+    log("WARN", "AI_EVALUATION_FALLBACK", trace_id,
+        message="AI failed, using random fallback"
+    )
     return {
         "priority_score": round(random.uniform(0, 1), 4),
         "priority_level": random.choice(PRIORITY_LEVELS),
@@ -72,8 +109,7 @@ def evaluate_with_fallback(payload):
     }, "fallback"
 
 
-def get_record(request_id, incident_id):
-    """Query record จาก DynamoDB ด้วย request_id + incident_id"""
+def get_record(request_id, incident_id, trace_id):
     try:
         response = table.get_item(
             Key={
@@ -83,14 +119,21 @@ def get_record(request_id, incident_id):
         )
         item = response.get("Item")
         if not item:
+            log("ERROR", "RECORD_NOT_FOUND", trace_id,
+                requestId=request_id,
+                incidentId=incident_id
+            )
             raise ValueError(f"Record not found for request_id: {request_id}")
         return item
     except Exception as e:
-        print(f"DynamoDB get_item failed: {e}")
+        log("ERROR", "DYNAMODB_GET_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
         raise
 
 
-def update_status_to_re_evaluate(request_id, incident_id):
+def update_status_to_re_evaluate(request_id, incident_id, trace_id):
     try:
         table.update_item(
             Key={
@@ -102,45 +145,60 @@ def update_status_to_re_evaluate(request_id, incident_id):
             ExpressionAttributeValues={":status": "RE_EVALUATE"},
             ConditionExpression="attribute_exists(request_id)"
         )
-        print(f"Status updated to RE_EVALUATE for request_id: {request_id}")
+        log("INFO", "STATUS_UPDATED_RE_EVALUATE", trace_id,
+            requestId=request_id,
+            incidentId=incident_id
+        )
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+        log("ERROR", "RECORD_NOT_FOUND", trace_id,
+            requestId=request_id,
+            message="ConditionalCheckFailed on RE_EVALUATE update"
+        )
         raise ValueError(f"Record not found for request_id: {request_id}")
     except Exception as e:
-        print(f"Failed to update status to RE_EVALUATE: {e}")
+        log("ERROR", "DYNAMODB_UPDATE_RE_EVALUATE_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
         raise
 
 
 def lambda_handler(event, context):
 
-    print("EVENT:", json.dumps(event))
+    trace_id = event.get("header", {}).get("traceId", "unknown")
 
     request_id = event["requestId"]
     incident_id = event["incidentId"]
     event_type = event.get("eventType", "CREATE")
 
-    print(f"eventType: {event_type}")
+    log("INFO", "EVALUATE_WORKER_STARTED", trace_id,
+        requestId=request_id,
+        incidentId=incident_id,
+        eventType=event_type,
+        lambdaRequestId=context.aws_request_id
+    )
 
     evaluate_id = str(uuid.uuid4())
 
-    # ถ้าเป็น UPDATE ให้ query record จาก DynamoDB แล้วอัปเดต status เป็น RE_EVALUATE
     if event_type == "UPDATE":
-        update_status_to_re_evaluate(request_id, incident_id)
-        record = get_record(request_id, incident_id)
-        payload = record  # ใช้ข้อมูลจาก DynamoDB ทั้งหมด (snake_case)
+        messageType = "RescueRequestReEvaluateEvent"
+        update_status_to_re_evaluate(request_id, incident_id, trace_id)
+        record = get_record(request_id, incident_id, trace_id)
+        payload = record
         header = event.get("header", {})
     else:
-        # CREATE — ใช้ payload ที่ส่งมาจาก createEventHandler ตามเดิม
+        messageType = "RescueRequestEvaluateEvent"
         payload = event["payload"]
         header = event["header"]
 
-    print("PAYLOAD:", json.dumps(payload, default=str))
-
     try:
-        evaluation, model_id = evaluate_with_ai(payload)
-        print(evaluation)
+        evaluation, model_id = evaluate_with_ai(payload, trace_id)
     except Exception as e:
-        print(f"AI evaluation failed: {e}")
-        evaluation, model_id = evaluate_with_fallback(payload)
+        log("WARN", "AI_EVALUATION_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
+        evaluation, model_id = evaluate_with_fallback(trace_id)
 
     priority_score = Decimal(str(evaluation["priority_score"]))
     priority_level = evaluation["priority_level"]
@@ -175,23 +233,35 @@ def lambda_handler(event, context):
             },
             ConditionExpression="attribute_exists(request_id)"
         )
+        log("INFO", "RECORD_EVALUATED", trace_id,
+            requestId=request_id,
+            incidentId=incident_id,
+            evaluateId=evaluate_id,
+            priorityLevel=priority_level,
+            priorityScore=float(priority_score),
+            modelId=model_id
+        )
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-        print(f"request_id not found in DynamoDB: {request_id}")
+        log("ERROR", "RECORD_NOT_FOUND", trace_id,
+            requestId=request_id,
+            message="ConditionalCheckFailed on EVALUATED update"
+        )
         raise ValueError(f"Record not found for request_id: {request_id}")
     except Exception as e:
-        print(f"DynamoDB update_item failed: {e}")
+        log("ERROR", "DYNAMODB_UPDATE_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
         raise
 
-    # สร้าง header สำหรับ publish event
     correlation_id = header.get("messageId") if header else event.get("correlationId")
     sns_header = {
-        "messageType": "RescueRequestEvaluatedEvent",
+        "messageType": messageType,
+        "traceId": trace_id,
         "correlationId": correlation_id,
         "sentAt": now,
         "version": 1
     }
-
-    print(f"Payload before return: {payload}")
 
     result = {
         "requestId": request_id,
@@ -209,6 +279,13 @@ def lambda_handler(event, context):
         "header": sns_header
     }
 
-    print("RESULT:", json.dumps(result, default=str))
+    log("INFO", "EVALUATE_WORKER_COMPLETED", trace_id,
+        requestId=request_id,
+        incidentId=incident_id,
+        evaluateId=evaluate_id,
+        priorityLevel=priority_level,
+        priorityScore=float(priority_score),
+        eventType=event_type
+    )
 
     return result

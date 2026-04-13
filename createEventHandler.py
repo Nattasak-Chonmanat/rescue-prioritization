@@ -1,12 +1,29 @@
 import json
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Attr
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("prioritization_records")
+
+
+def log(level, event_name, trace_id, **kwargs):
+    """Structured JSON logging"""
+    entry = {
+        "level": level,
+        "event": event_name,
+        "traceId": trace_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **kwargs
+    }
+    log_fn = getattr(logger, level.lower(), logger.info)
+    log_fn(json.dumps(entry, default=str))
 
 
 def convert_numbers(obj):
@@ -23,14 +40,20 @@ def convert_numbers(obj):
 
 def lambda_handler(event, context):
 
-    print("EVENT:", json.dumps(event))
+    trace_id = event.get("header", {}).get("traceId", "unknown")
+
+    log("INFO", "CREATE_EVENT_HANDLER_STARTED", trace_id,
+        requestId=event.get("header", {}).get("correlationId"),
+        messageId=event.get("header", {}).get("messageId"),
+        lambdaRequestId=context.aws_request_id
+    )
 
     header = event["header"]
     payload = event["body"]
-
     request_id = payload["requestId"]
 
     now = datetime.now(timezone.utc).isoformat()
+
     item = {
         "request_id": request_id,
         "incident_id": payload["incidentId"],
@@ -50,14 +73,27 @@ def lambda_handler(event, context):
             Item=item,
             ConditionExpression=Attr("request_id").not_exists()
         )
+        log("INFO", "RECORD_CREATED", trace_id,
+            requestId=request_id,
+            incidentId=payload["incidentId"],
+            status="PENDING"
+        )
+
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-        print(f"Duplicate request_id: {request_id}, skipping.")
+        log("WARN", "DUPLICATE_REQUEST", trace_id,
+            requestId=request_id,
+            message="request_id already exists, skipping"
+        )
         return {"duplicate": True}
+
     except Exception as e:
-        print(f"DynamoDB put_item failed: {e}")
+        log("ERROR", "DYNAMODB_PUT_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
         raise
 
-    return {
+    result = {
         "requestId": request_id,
         "incidentId": payload["incidentId"],
         "header": header,
@@ -72,3 +108,11 @@ def lambda_handler(event, context):
         "duplicate": False,
         "eventType": "CREATE"
     }
+
+    log("INFO", "CREATE_EVENT_HANDLER_COMPLETED", trace_id,
+        requestId=request_id,
+        incidentId=payload["incidentId"],
+        eventType="CREATE"
+    )
+
+    return result

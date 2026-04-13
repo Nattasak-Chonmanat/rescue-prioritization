@@ -156,7 +156,32 @@
                                 "Output": "{% { 'error': $states.input, 'stage': 'EvaluateWorker' } %}"
                             }
                         ],
-                        "Next": "Publish Evaluated Event"
+                        "Next": "Choice"
+                    },
+                    "Choice": {
+                        "Type": "Choice",
+                        "Choices": [
+                            {
+                                "Next": "Publish Evaluated Event",
+                                "Condition": "{% $states.input.header.messageType = 'RescueRequestEvaluateEvent' %}"
+                            },
+                            {
+                                "Next": "Publish ReEvaluated Event",
+                                "Condition": "{% $states.input.header.messageType = 'RescueRequestReEvaluateEvent' %}"
+                            }
+                        ]
+                    },
+                    "Publish ReEvaluated Event": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::sns:publish",
+                        "Arguments": {
+                            "Message": "{% $states.input %}",
+                            "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-request-updated-v1"
+                        },
+                        "Next": "Publish Update Event Success"
+                    },
+                    "Publish Update Event Success": {
+                        "Type": "Succeed"
                     },
                     "Publish Evaluated Event": {
                         "Type": "Task",
@@ -165,9 +190,9 @@
                             "Message": "{% $states.input %}",
                             "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-prioritization-events-v1"
                         },
-                        "Next": "Success"
+                        "Next": "Publish Create Event Success"
                     },
-                    "Success": {
+                    "Publish Create Event Success": {
                         "Type": "Succeed"
                     },
                     "Send To Dead Letter Queue": {
