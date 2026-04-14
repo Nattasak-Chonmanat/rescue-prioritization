@@ -13,34 +13,8 @@
                 "StartAt": "Event Handler",
                 "States": {
                     "Event Handler": {
-                        "Type": "Task",
-                        "Resource": "arn:aws:states:::lambda:invoke",
-                        "Output": "{% $states.result.Payload %}",
-                        "Arguments": {
-                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:eventHandler:$LATEST",
-                            "Payload": "{% $states.input %}"
-                        },
-                        "Retry": [
-                            {
-                                "ErrorEquals": [
-                                    "Lambda.ServiceException",
-                                    "Lambda.AWSLambdaException",
-                                    "Lambda.SdkClientException",
-                                    "Lambda.TooManyRequestsException"
-                                ],
-                                "IntervalSeconds": 1,
-                                "MaxAttempts": 3,
-                                "BackoffRate": 2,
-                                "JitterStrategy": "FULL"
-                            }
-                        ],
-                        "Catch": [
-                            {
-                                "ErrorEquals": ["States.ALL"],
-                                "Next": "Send To Dead Letter Queue",
-                                "Output": "{% { 'error': $states.input, 'stage': 'EventHandler' } %}"
-                            }
-                        ],
+                        "Type": "Pass",
+                        "Output": "{% $parse($states.input.body) %}",
                         "Next": "Check Event Type"
                     },
                     "Check Event Type": {
@@ -78,6 +52,22 @@
                                 "JitterStrategy": "FULL"
                             }
                         ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": ["States.ALL"],
+                                "Next": "Send To Dead Letter Queue",
+                                "Output": {
+                                    "originalInput": "{% $states.input %}",
+                                    "error": {
+                                        "name": "{% $states.errorOutput.Error %}",
+                                        "cause": "{% $states.errorOutput.Cause %}",
+                                        "stage": "CreateEventHandler",
+                                        "timestamp": "{% $now() %}",
+                                        "executionId": "{% $states.context.Execution.Id %}"
+                                    }
+                                }
+                            }
+                        ],
                         "Next": "Check Duplicate"
                     },
                     "Update Event Handler": {
@@ -106,7 +96,16 @@
                             {
                                 "ErrorEquals": ["States.ALL"],
                                 "Next": "Send To Dead Letter Queue",
-                                "Output": "{% { 'error': $states.input, 'stage': 'UpdateEventHandler' } %}"
+                                "Output": {
+                                    "originalInput": "{% $states.input %}",
+                                    "error": {
+                                        "name": "{% $states.errorOutput.Error %}",
+                                        "cause": "{% $states.errorOutput.Cause %}",
+                                        "stage": "UpdateEventHandler",
+                                        "timestamp": "{% $now() %}",
+                                        "executionId": "{% $states.context.Execution.Id %}"
+                                    }
+                                }
                             }
                         ],
                         "Next": "Evaluate Worker"
@@ -153,7 +152,16 @@
                             {
                                 "ErrorEquals": ["States.ALL"],
                                 "Next": "Send To Dead Letter Queue",
-                                "Output": "{% { 'error': $states.input, 'stage': 'EvaluateWorker' } %}"
+                                "Output": {
+                                    "originalInput": "{% $states.input %}",
+                                    "error": {
+                                        "name": "{% $states.errorOutput.Error %}",
+                                        "cause": "{% $states.errorOutput.Cause %}",
+                                        "stage": "EvaluateWorker",
+                                        "timestamp": "{% $now() %}",
+                                        "executionId": "{% $states.context.Execution.Id %}"
+                                    }
+                                }
                             }
                         ],
                         "Next": "Choice"
@@ -199,8 +207,22 @@
                         "Type": "Task",
                         "Resource": "arn:aws:states:::sqs:sendMessage",
                         "Arguments": {
-                            "MessageBody": "{% $states.input %}",
-                            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/955468203539/rescue-request-created-dlq"
+                            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/955468203539/rescue-request-created-dlq",
+                            "MessageBody": "{% $string($states.input) %}",
+                            "MessageAttributes": {
+                                "stage": {
+                                    "DataType": "String",
+                                    "StringValue": "{% $states.input.error.stage %}"
+                                },
+                                "errorName": {
+                                    "DataType": "String",
+                                    "StringValue": "{% $states.input.error.name %}"
+                                },
+                                "executionId": {
+                                    "DataType": "String",
+                                    "StringValue": "{% $states.input.error.executionId %}"
+                                }
+                            }
                         },
                         "Next": "Fail"
                     },

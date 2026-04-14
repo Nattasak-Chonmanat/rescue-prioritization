@@ -262,8 +262,8 @@ def lambda_handler(event, context):
         "sentAt": now,
         "version": 1
     }
-
-    result = {
+    
+    body = {
         "requestId": request_id,
         "incidentId": incident_id,
         "evaluateId": evaluate_id,
@@ -276,6 +276,10 @@ def lambda_handler(event, context):
         "location": payload.get("location"),
         "peopleCount": payload.get("people_count") or payload.get("peopleCount"),
         "specialNeeds": payload.get("special_needs") or payload.get("specialNeeds", []),
+    }
+
+    result = {
+        "body": body,
         "header": sns_header
     }
 
