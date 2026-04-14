@@ -1,16 +1,9 @@
-# Rescue Request Prioritization Pipeline - Terraform Configuration
-# 
-# This Terraform configuration deploys the complete infrastructure for the rescue prioritization system:
-#
-# Resources implemented:
-# - DynamoDB table for storing prioritization records (dynamodb.tf)
-# - Lambda functions for handling creation, updates, and AI-based prioritization (lambda.tf)
-# - SQS queues and dead letter queue for processing decoupling (sqs.tf)
-# - SNS topics for event notifications (sns.tf)
-# - API Gateway endpoint for submitting synchronous requests (api_gateway.tf)
-# - Step Functions state machine for orchestrating the prioritization workflow (step_functions.tf)
-#
-# Configuration:
-# - provider.tf: AWS provider and default settings
-# - variables.tf: All configurable variables
-# - outputs.tf: Important resource identifiers for reference
+# Not implemented yet
+
+# TODO: Implement the following resources in Terraform:
+# - Create DynamoDB table for storing prioritization records
+# - Create Lambda function for handling synchronous, async processing of prioritization requests
+# - Create queue and dead letter queue (e.g., SQS) for decoupling the processing of prioritization requests
+# - Create SNS topic for sending notifications about prioritization results
+# - Create API Gateway endpoint for triggering synchronous request
+# - Create Step Functions state machine for orchestrating the prioritization workflow
