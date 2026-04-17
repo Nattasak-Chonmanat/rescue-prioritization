@@ -1,16 +1,32 @@
 import json
 from decimal import Decimal, InvalidOperation
-
+import logging
+from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("prioritization_records")
+
 
 VALID_PRIORITY_LEVELS = {"LOW", "NORMAL", "HIGH", "CRITICAL"}
 VALID_STATUSES = {"PENDING", "EVALUATED", "RE_EVALUATE", "FAILED"}
 VALID_SORT_ORDERS = {"asc", "desc"}
 VALID_SORT_BY = {"score"}
+
+def log(level, event_name, trace_id, **kwargs):
+    entry = {
+        "level": level,
+        "event": event_name,
+        "traceId": trace_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **kwargs
+    }
+    log_fn = getattr(logger, level.lower(), logger.info)
+    log_fn(json.dumps(entry, default=str))
 
 
 def response(status_code, body):
