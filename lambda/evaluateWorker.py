@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-import random
+# import random
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -98,15 +98,136 @@ def evaluate_with_ai(payload, trace_id):
     return result, "gemma-3-27b-it"
 
 
-def evaluate_with_fallback(trace_id):
+def evaluate_with_fallback(payload, trace_id):
+    """
+    Rule-based fallback evaluation อิงจากหลักการ Triage และ Disaster Response
+    อ้างอิง:
+    - START Triage System (Simple Triage and Rapid Treatment)
+    - SALT Triage (Sort, Assess, Lifesaving Interventions, Treatment/Transport)
+    - WHO Emergency Triage Assessment and Treatment (ETAT)
+    - FEMA Incident Command System Priority Guidelines
+    """
+
     log("WARN", "AI_EVALUATION_FALLBACK", trace_id,
-        message="AI failed, using random fallback"
+        message="AI failed, using rule-based fallback"
     )
+
+    score = 0.0
+    reasons = []
+
+    people_count = int(payload.get("people_count") or payload.get("peopleCount") or 1)
+    special_needs = payload.get("special_needs") or payload.get("specialNeeds") or []
+    description = (payload.get("description") or "").lower()
+    request_type = (payload.get("request_type") or payload.get("requestType") or "").lower()
+
+
+    if people_count >= 10:
+        score += 0.30
+        reasons.append(f"Large group ({people_count} people)")
+    elif people_count >= 5:
+        score += 0.20
+        reasons.append(f"Medium group ({people_count} people)")
+    elif people_count >= 2:
+        score += 0.10
+        reasons.append(f"Small group ({people_count} people)")
+    else:
+        score += 0.05
+        reasons.append("Individual")
+
+
+    special_needs_lower = [s.lower() for s in special_needs]
+    special_needs_score = 0.0
+
+    if "bedridden" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.30)
+        reasons.append("Bedridden patient (immobile, high risk)")
+    if "infant" in special_needs_lower or "newborn" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.30)
+        reasons.append("Infant/Newborn (critical vulnerability)")
+    if "children" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.20)
+        reasons.append("Children present")
+    if "elderly" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.20)
+        reasons.append("Elderly person (high risk)")
+    if "pregnant" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.25)
+        reasons.append("Pregnant person (high risk)")
+    if "disability" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.15)
+        reasons.append("Person with disability")
+    if "medical_equipment" in special_needs_lower:
+        special_needs_score = max(special_needs_score, 0.25)
+        reasons.append("Requires medical equipment (life-dependent)")
+
+    score += special_needs_score
+
+
+    life_threatening_keywords = [
+        "จม", "drown",
+        "ไฟ", "fire", "เพลิง",
+        "หมดสติ", "unconscious", "ไม่รู้สึกตัว",
+        "หายใจไม่ออก", "breathing",
+        "เลือดออก", "bleeding",
+        "บาดเจ็บ", "injury", "injured",
+        "ติดอยู่", "trapped", "stuck",
+        "ถูกกด", "crushed", "ถูกทับ",
+        "น้ำท่วมเร็ว", "rising water", "น้ำขึ้นสูง"
+    ]
+    urgent_keywords = [
+        "ช่วยด่วน", "urgent", "emergency",
+        "อันตราย", "danger",
+        "วิกฤต", "critical",
+        "ไม่มีอาหาร", "no food", "หิว",
+        "ไม่มีน้ำ", "no water"
+    ]
+
+    if any(kw in description for kw in life_threatening_keywords):
+        score += 0.25
+        reasons.append("Life-threatening situation detected in description")
+    elif any(kw in description for kw in urgent_keywords):
+        score += 0.10
+        reasons.append("Urgent situation detected in description")
+
+
+    request_type_scores = {
+        "flood_rescue":     0.15,
+        "fire_rescue":      0.15,
+        "collapse_rescue":  0.15,
+        "medical":          0.12,
+        "evacuation":       0.10,
+        "supply":           0.05,
+        "other":            0.05,
+    }
+    type_score = request_type_scores.get(request_type, 0.05)
+    score += type_score
+    reasons.append(f"Request type: {request_type}")
+
+    score = min(round(score, 4), 1.0)
+
+
+    if score >= 0.75:
+        priority_level = "CRITICAL"
+    elif score >= 0.50:
+        priority_level = "HIGH"
+    elif score >= 0.25:
+        priority_level = "NORMAL"
+    else:
+        priority_level = "LOW"
+
+    reason = f"[Rule-based fallback] {'; '.join(reasons)}. Score: {score}"
+
+    log("INFO", "FALLBACK_EVALUATION_COMPLETED", trace_id,
+        priorityLevel=priority_level,
+        priorityScore=score,
+        reason=reason
+    )
+
     return {
-        "priority_score": round(random.uniform(0, 1), 4),
-        "priority_level": random.choice(PRIORITY_LEVELS),
-        "reason": "fallback"
-    }, "fallback"
+        "priority_score": score,
+        "priority_level": priority_level,
+        "reason": reason
+    }, "rule-based-fallback"
 
 
 def get_record(request_id, incident_id, trace_id):
@@ -161,6 +282,32 @@ def update_status_to_re_evaluate(request_id, incident_id, trace_id):
             error=str(e)
         )
         raise
+    
+def update_status_to_failed(request_id, incident_id, trace_id, error_reason=""):
+    try:
+        table.update_item(
+            Key={
+                "request_id": request_id,
+                "incident_id": incident_id
+            },
+            UpdateExpression="SET #s = :status, failed_reason = :reason",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":status": "FAILED",
+                ":reason": error_reason
+            }
+        )
+        log("INFO", "STATUS_UPDATED_FAILED", trace_id,
+            requestId=request_id,
+            incidentId=incident_id,
+            failedReason=error_reason
+        )
+    except Exception as e:
+        log("ERROR", "DYNAMODB_UPDATE_FAILED_STATUS_FAILED", trace_id,
+            requestId=request_id,
+            error=str(e)
+        )
+        raise
 
 
 def lambda_handler(event, context):
@@ -191,6 +338,15 @@ def lambda_handler(event, context):
         payload = event["payload"]
         header = event["header"]
 
+    # try:
+    #     evaluation, model_id = evaluate_with_ai(payload, trace_id)
+    # except Exception as e:
+    #     log("WARN", "AI_EVALUATION_FAILED", trace_id,
+    #         requestId=request_id,
+    #         error=str(e)
+    #     )
+    #     evaluation, model_id = evaluate_with_fallback(payload, trace_id)
+        
     try:
         evaluation, model_id = evaluate_with_ai(payload, trace_id)
     except Exception as e:
@@ -198,7 +354,18 @@ def lambda_handler(event, context):
             requestId=request_id,
             error=str(e)
         )
-        evaluation, model_id = evaluate_with_fallback(trace_id)
+        try:
+            evaluation, model_id = evaluate_with_fallback(payload, trace_id)
+        except Exception as fallback_error:
+            log("ERROR", "FALLBACK_EVALUATION_FAILED", trace_id,
+                requestId=request_id,
+                error=str(fallback_error)
+            )
+            update_status_to_failed(
+                request_id, incident_id, trace_id,
+                error_reason=f"AI failed: {str(e)} | Fallback failed: {str(fallback_error)}"
+            )
+            raise
 
     priority_score = Decimal(str(evaluation["priority_score"]))
     priority_level = evaluation["priority_level"]
