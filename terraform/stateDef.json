@@ -14,21 +14,26 @@
                 "States": {
                     "Event Handler": {
                         "Type": "Pass",
-                        "Output": "{% $parse($states.input.body) %}",
+                        "Output": "{% $parse($parse($states.input.body).Message) %}",
                         "Next": "Check Event Type"
                     },
                     "Check Event Type": {
                         "Type": "Choice",
                         "Choices": [
                             {
-                                "Condition": "{% $states.input.header.eventType = 'rescue-request.created' %}",
+                                "Condition": "{% $states.input.header.eventType = 'rescue-request.created' or $states.input.header.messageType = 'ResourceRequestCreated' %}",
                                 "Next": "Create Event Handler"
                             },
                             {
                                 "Condition": "{% $states.input.header.eventType = 'rescue-request.citizen-updated' %}",
                                 "Next": "Update Event Handler"
                             }
-                        ]
+                        ],
+                        "Default": "Skip Message"
+                    },
+                    "Skip Message": {
+                        "Type": "Succeed",
+                        "Comment": "Not supported message type"
                     },
                     "Create Event Handler": {
                         "Type": "Task",
@@ -164,32 +169,7 @@
                                 }
                             }
                         ],
-                        "Next": "Choice"
-                    },
-                    "Choice": {
-                        "Type": "Choice",
-                        "Choices": [
-                            {
-                                "Next": "Publish Evaluated Event",
-                                "Condition": "{% $states.input.header.messageType = 'RescueRequestEvaluateEvent' %}"
-                            },
-                            {
-                                "Next": "Publish ReEvaluated Event",
-                                "Condition": "{% $states.input.header.messageType = 'RescueRequestReEvaluateEvent' %}"
-                            }
-                        ]
-                    },
-                    "Publish ReEvaluated Event": {
-                        "Type": "Task",
-                        "Resource": "arn:aws:states:::sns:publish",
-                        "Arguments": {
-                            "Message": "{% $states.input %}",
-                            "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-request-updated-v1"
-                        },
-                        "Next": "Publish Update Event Success"
-                    },
-                    "Publish Update Event Success": {
-                        "Type": "Succeed"
+                        "Next": "Publish Evaluated Event"
                     },
                     "Publish Evaluated Event": {
                         "Type": "Task",
@@ -198,9 +178,9 @@
                             "Message": "{% $states.input %}",
                             "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-prioritization-events-v1"
                         },
-                        "Next": "Publish Create Event Success"
+                        "Next": "Publish  Event Success"
                     },
-                    "Publish Create Event Success": {
+                    "Publish  Event Success": {
                         "Type": "Succeed"
                     },
                     "Send To Dead Letter Queue": {

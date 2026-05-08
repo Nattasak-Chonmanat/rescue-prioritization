@@ -1,13 +1,11 @@
 import json
 import logging
 import os
-# import random
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import boto3
-from boto3.dynamodb.conditions import Key
 from google import genai
 from google.genai import types
 
@@ -22,9 +20,10 @@ PRIORITY_LEVELS = ["LOW", "NORMAL", "HIGH", "CRITICAL"]
 client = genai.Client(
     api_key=os.environ["GEMINI_API_KEY"],
     http_options=types.HttpOptions(
-        timeout=10_000  # 10 seconds 
+        timeout=30_000
     )
 )
+
 
 def log(level, event_name, trace_id, **kwargs):
     entry = {
@@ -34,135 +33,230 @@ def log(level, event_name, trace_id, **kwargs):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **kwargs
     }
+
     log_fn = getattr(logger, level.lower(), logger.info)
     log_fn(json.dumps(entry, default=str))
 
 
-def evaluate_with_ai(payload, trace_id):
-    prompt = f"""
-    You are an emergency rescue prioritization system.
-    You MUST return valid JSON only. No markdown, no explanation outside JSON.
+def is_resource_request_event(header: dict) -> bool:
+    return (
+        header.get("messageType") == "ResourceRequestCreated"
+        or header.get("producer") == "resource-request-service"
+    )
 
-    Return exactly this format:
-    {{
-      "priority_score": <float 0.0-1.0>,
-      "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
-      "reason": <brief explanation in English>
-    }}
 
-    Request details:
-    - People count: {payload.get("people_count")}
-    - Special needs: {payload.get("special_needs", [])}
-    - Description: {payload.get("description")}
-    - Location: {payload.get("location")}
-    - Request Type: {payload.get("request_type")}
-    """
+def evaluate_with_ai(payload, trace_id, is_resource_request=False):
 
-    log("INFO", "AI_EVALUATION_STARTED", trace_id,
-        model="gemma-3-27b-it"
+    if is_resource_request:
+        prompt = f"""
+        You are an emergency resource request prioritization system.
+        You MUST return valid JSON only. No markdown, no explanation outside JSON.
+
+        Evaluate how urgent and critical this resource request is
+        based on:
+        - severity described in the request
+        - medical urgency
+        - rescue operation impact
+        - requested resources/items
+        - risk to human life
+        - scale of impact
+
+        Return exactly this format:
+        {{
+          "priority_score": <float 0.0-1.0>,
+          "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
+          "reason": <brief explanation in English>
+        }}
+
+        Resource Request Details:
+        - Description: {payload.get("description")}
+        - Location: {payload.get("location")}
+        - Request Type: {payload.get("request_type") or payload.get("requestType")}
+        - Items: {payload.get("items", [])}
+        """
+
+    else:
+        prompt = f"""
+        You are an emergency rescue prioritization system.
+        You MUST return valid JSON only. No markdown, no explanation outside JSON.
+
+        Return exactly this format:
+        {{
+          "priority_score": <float 0.0-1.0>,
+          "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
+          "reason": <brief explanation in English>
+        }}
+
+        Request details:
+        - People count: {payload.get("people_count") or payload.get("peopleCount")}
+        - Special needs: {payload.get("special_needs") or payload.get("specialNeeds", [])}
+        - Description: {payload.get("description")}
+        - Location: {payload.get("location")}
+        - Request Type: {payload.get("request_type") or payload.get("requestType")}
+        """
+
+    log(
+        "INFO",
+        "AI_EVALUATION_STARTED",
+        trace_id,
+        model="gemini-3.1-flash-lite",
+        isResourceRequest=is_resource_request
     )
 
     response = client.models.generate_content(
-        model="gemma-3-27b-it",
-        contents=prompt
+        model="gemini-3.1-flash-lite",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_level="low"
+            )
+        )
     )
+
     text = response.text.strip()
 
     if text.startswith("```"):
         text = text.split("```")[1]
+
         if text.startswith("json"):
             text = text[4:]
+
         text = text.strip()
 
     result = json.loads(text)
 
     if result["priority_level"] not in PRIORITY_LEVELS:
-        log("ERROR", "AI_INVALID_PRIORITY_LEVEL", trace_id,
+        log(
+            "ERROR",
+            "AI_INVALID_PRIORITY_LEVEL",
+            trace_id,
             priorityLevel=result["priority_level"]
         )
-        raise ValueError(f"Invalid priority_level from model: {result['priority_level']}")
+
+        raise ValueError(
+            f"Invalid priority_level from model: {result['priority_level']}"
+        )
 
     try:
         Decimal(str(result["priority_score"]))
+
     except InvalidOperation:
-        log("ERROR", "AI_INVALID_PRIORITY_SCORE", trace_id,
+        log(
+            "ERROR",
+            "AI_INVALID_PRIORITY_SCORE",
+            trace_id,
             priorityScore=result["priority_score"]
         )
-        raise ValueError(f"Invalid priority_score from model: {result['priority_score']}")
 
-    log("INFO", "AI_EVALUATION_COMPLETED", trace_id,
+        raise ValueError(
+            f"Invalid priority_score from model: {result['priority_score']}"
+        )
+
+    log(
+        "INFO",
+        "AI_EVALUATION_COMPLETED",
+        trace_id,
         priorityLevel=result["priority_level"],
         priorityScore=result["priority_score"]
     )
 
-    return result, "gemma-3-27b-it"
+    return result, "gemini-3.1-flash-lite"
 
 
 def evaluate_with_fallback(payload, trace_id):
     """
-    Rule-based fallback evaluation อิงจากหลักการ Triage และ Disaster Response
-    อ้างอิง:
-    - START Triage System (Simple Triage and Rapid Treatment)
-    - SALT Triage (Sort, Assess, Lifesaving Interventions, Treatment/Transport)
-    - WHO Emergency Triage Assessment and Treatment (ETAT)
-    - FEMA Incident Command System Priority Guidelines
+    Rule-based fallback evaluation
     """
 
-    log("WARN", "AI_EVALUATION_FALLBACK", trace_id,
+    log(
+        "WARN",
+        "AI_EVALUATION_FALLBACK",
+        trace_id,
         message="AI failed, using rule-based fallback"
     )
 
     score = 0.0
     reasons = []
 
-    people_count = int(payload.get("people_count") or payload.get("peopleCount") or 1)
-    special_needs = payload.get("special_needs") or payload.get("specialNeeds") or []
+    people_count = int(
+        payload.get("people_count")
+        or payload.get("peopleCount")
+        or 1
+    )
+
+    special_needs = (
+        payload.get("special_needs")
+        or payload.get("specialNeeds")
+        or []
+    )
+
+    if isinstance(special_needs, str):
+        special_needs = [special_needs] if special_needs else []
+
+    special_needs_lower = [s.lower() for s in special_needs]
+
     description = (payload.get("description") or "").lower()
-    request_type = (payload.get("request_type") or payload.get("requestType") or "").lower()
 
+    request_type = (
+        payload.get("request_type")
+        or payload.get("requestType")
+        or ""
+    ).lower()
 
+    # --- 1. People Count Weight ---
     if people_count >= 10:
         score += 0.30
         reasons.append(f"Large group ({people_count} people)")
+
     elif people_count >= 5:
         score += 0.20
         reasons.append(f"Medium group ({people_count} people)")
+
     elif people_count >= 2:
         score += 0.10
         reasons.append(f"Small group ({people_count} people)")
+
     else:
         score += 0.05
         reasons.append("Individual")
 
-
-    special_needs_lower = [s.lower() for s in special_needs]
+    # --- 2. Special Needs Weight ---
     special_needs_score = 0.0
 
     if "bedridden" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.30)
         reasons.append("Bedridden patient (immobile, high risk)")
-    if "infant" in special_needs_lower or "newborn" in special_needs_lower:
+
+    if (
+        "infant" in special_needs_lower
+        or "newborn" in special_needs_lower
+    ):
         special_needs_score = max(special_needs_score, 0.30)
         reasons.append("Infant/Newborn (critical vulnerability)")
+
     if "children" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.20)
         reasons.append("Children present")
+
     if "elderly" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.20)
         reasons.append("Elderly person (high risk)")
+
     if "pregnant" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.25)
         reasons.append("Pregnant person (high risk)")
+
     if "disability" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.15)
         reasons.append("Person with disability")
+
     if "medical_equipment" in special_needs_lower:
         special_needs_score = max(special_needs_score, 0.25)
         reasons.append("Requires medical equipment (life-dependent)")
 
     score += special_needs_score
 
-
+    # --- 3. Life-Threatening Keywords ---
     life_threatening_keywords = [
         "จม", "drown",
         "ไฟ", "fire", "เพลิง",
@@ -174,6 +268,7 @@ def evaluate_with_fallback(payload, trace_id):
         "ถูกกด", "crushed", "ถูกทับ",
         "น้ำท่วมเร็ว", "rising water", "น้ำขึ้นสูง"
     ]
+
     urgent_keywords = [
         "ช่วยด่วน", "urgent", "emergency",
         "อันตราย", "danger",
@@ -185,39 +280,53 @@ def evaluate_with_fallback(payload, trace_id):
     if any(kw in description for kw in life_threatening_keywords):
         score += 0.25
         reasons.append("Life-threatening situation detected in description")
+
     elif any(kw in description for kw in urgent_keywords):
         score += 0.10
         reasons.append("Urgent situation detected in description")
 
-
+    # --- 4. Request Type Weight ---
     request_type_scores = {
-        "flood_rescue":     0.15,
-        "fire_rescue":      0.15,
-        "collapse_rescue":  0.15,
-        "medical":          0.12,
-        "evacuation":       0.10,
-        "supply":           0.05,
-        "other":            0.05,
+        "flood_rescue": 0.15,
+        "fire_rescue": 0.15,
+        "collapse_rescue": 0.15,
+        "medical": 0.12,
+        "evacuation": 0.10,
+        "supply": 0.05,
+        "other": 0.05,
     }
+
     type_score = request_type_scores.get(request_type, 0.05)
+
     score += type_score
     reasons.append(f"Request type: {request_type}")
 
+    # --- Normalize ---
     score = min(round(score, 4), 1.0)
 
-
+    # --- Priority Mapping ---
     if score >= 0.75:
         priority_level = "CRITICAL"
+
     elif score >= 0.50:
         priority_level = "HIGH"
+
     elif score >= 0.25:
         priority_level = "NORMAL"
+
     else:
         priority_level = "LOW"
 
-    reason = f"[Rule-based fallback] {'; '.join(reasons)}. Score: {score}"
+    reason = (
+        f"[Rule-based fallback] "
+        f"{'; '.join(reasons)}. "
+        f"Score: {score}"
+    )
 
-    log("INFO", "FALLBACK_EVALUATION_COMPLETED", trace_id,
+    log(
+        "INFO",
+        "FALLBACK_EVALUATION_COMPLETED",
+        trace_id,
         priorityLevel=priority_level,
         priorityScore=score,
         reason=reason
@@ -231,6 +340,7 @@ def evaluate_with_fallback(payload, trace_id):
 
 
 def get_record(request_id, incident_id, trace_id):
+
     try:
         response = table.get_item(
             Key={
@@ -238,23 +348,42 @@ def get_record(request_id, incident_id, trace_id):
                 "incident_id": incident_id
             }
         )
+
         item = response.get("Item")
+
         if not item:
-            log("ERROR", "RECORD_NOT_FOUND", trace_id,
+            log(
+                "ERROR",
+                "RECORD_NOT_FOUND",
+                trace_id,
                 requestId=request_id,
                 incidentId=incident_id
             )
-            raise ValueError(f"Record not found for request_id: {request_id}")
+
+            raise ValueError(
+                f"Record not found for request_id: {request_id}"
+            )
+
         return item
+
     except Exception as e:
-        log("ERROR", "DYNAMODB_GET_FAILED", trace_id,
+        log(
+            "ERROR",
+            "DYNAMODB_GET_FAILED",
+            trace_id,
             requestId=request_id,
             error=str(e)
         )
+
         raise
 
 
-def update_status_to_re_evaluate(request_id, incident_id, trace_id):
+def update_status_to_re_evaluate(
+    request_id,
+    incident_id,
+    trace_id
+):
+
     try:
         table.update_item(
             Key={
@@ -262,63 +391,110 @@ def update_status_to_re_evaluate(request_id, incident_id, trace_id):
                 "incident_id": incident_id
             },
             UpdateExpression="SET #s = :status",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":status": "RE_EVALUATE"},
+            ExpressionAttributeNames={
+                "#s": "status"
+            },
+            ExpressionAttributeValues={
+                ":status": "RE_EVALUATE"
+            },
             ConditionExpression="attribute_exists(request_id)"
         )
-        log("INFO", "STATUS_UPDATED_RE_EVALUATE", trace_id,
+
+        log(
+            "INFO",
+            "STATUS_UPDATED_RE_EVALUATE",
+            trace_id,
             requestId=request_id,
             incidentId=incident_id
         )
+
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-        log("ERROR", "RECORD_NOT_FOUND", trace_id,
+
+        log(
+            "ERROR",
+            "RECORD_NOT_FOUND",
+            trace_id,
             requestId=request_id,
             message="ConditionalCheckFailed on RE_EVALUATE update"
         )
-        raise ValueError(f"Record not found for request_id: {request_id}")
+
+        raise ValueError(
+            f"Record not found for request_id: {request_id}"
+        )
+
     except Exception as e:
-        log("ERROR", "DYNAMODB_UPDATE_RE_EVALUATE_FAILED", trace_id,
+        log(
+            "ERROR",
+            "DYNAMODB_UPDATE_RE_EVALUATE_FAILED",
+            trace_id,
             requestId=request_id,
             error=str(e)
         )
+
         raise
-    
-def update_status_to_failed(request_id, incident_id, trace_id, error_reason=""):
+
+
+def update_status_to_failed(
+    request_id,
+    incident_id,
+    trace_id,
+    error_reason=""
+):
+
     try:
         table.update_item(
             Key={
                 "request_id": request_id,
                 "incident_id": incident_id
             },
-            UpdateExpression="SET #s = :status, failed_reason = :reason",
-            ExpressionAttributeNames={"#s": "status"},
+            UpdateExpression=(
+                "SET #s = :status, failed_reason = :reason"
+            ),
+            ExpressionAttributeNames={
+                "#s": "status"
+            },
             ExpressionAttributeValues={
                 ":status": "FAILED",
                 ":reason": error_reason
             }
         )
-        log("INFO", "STATUS_UPDATED_FAILED", trace_id,
+
+        log(
+            "INFO",
+            "STATUS_UPDATED_FAILED",
+            trace_id,
             requestId=request_id,
             incidentId=incident_id,
             failedReason=error_reason
         )
+
     except Exception as e:
-        log("ERROR", "DYNAMODB_UPDATE_FAILED_STATUS_FAILED", trace_id,
+        log(
+            "ERROR",
+            "DYNAMODB_UPDATE_FAILED_STATUS_FAILED",
+            trace_id,
             requestId=request_id,
             error=str(e)
         )
+
         raise
 
 
 def lambda_handler(event, context):
 
-    trace_id = event.get("header", {}).get("traceId", "unknown")
+    trace_id = event.get("header", {}).get(
+        "traceId",
+        "unknown"
+    )
 
     request_id = event["requestId"]
     incident_id = event["incidentId"]
     event_type = event.get("eventType", "CREATE")
 
-    log("INFO", "EVALUATE_WORKER_STARTED", trace_id,
+    log(
+        "INFO",
+        "EVALUATE_WORKER_STARTED",
+        trace_id,
         requestId=request_id,
         incidentId=incident_id,
         eventType=event_type,
@@ -327,48 +503,87 @@ def lambda_handler(event, context):
 
     evaluate_id = str(uuid.uuid4())
 
-    if event_type == "UPDATE":
-        messageType = "RescueRequestReEvaluateEvent"
-        update_status_to_re_evaluate(request_id, incident_id, trace_id)
-        record = get_record(request_id, incident_id, trace_id)
-        payload = record
-        header = event.get("header", {})
-    else:
-        messageType = "RescueRequestEvaluateEvent"
-        payload = event["payload"]
-        header = event["header"]
+    header = event.get("header", {})
+    is_resource_request = is_resource_request_event(header)
 
-    # try:
-    #     evaluation, model_id = evaluate_with_ai(payload, trace_id)
-    # except Exception as e:
-    #     log("WARN", "AI_EVALUATION_FAILED", trace_id,
-    #         requestId=request_id,
-    #         error=str(e)
-    #     )
-    #     evaluation, model_id = evaluate_with_fallback(payload, trace_id)
-        
+    if event_type == "UPDATE":
+
+        if is_resource_request:
+            messageType = "ResourceRequestReEvaluateEvent"
+        else:
+            messageType = "RescueRequestReEvaluateEvent"
+
+        update_status_to_re_evaluate(
+            request_id,
+            incident_id,
+            trace_id
+        )
+
+        payload = get_record(
+            request_id,
+            incident_id,
+            trace_id
+        )
+
+    else:
+        payload = event["payload"]
+
+        if is_resource_request:
+            messageType = "ResourceRequestEvaluateEvent"
+        else:
+            messageType = "RescueRequestEvaluateEvent"
+
     try:
-        evaluation, model_id = evaluate_with_ai(payload, trace_id)
+        evaluation, model_id = evaluate_with_ai(
+            payload,
+            trace_id,
+            is_resource_request=is_resource_request
+        )
+
     except Exception as e:
-        log("WARN", "AI_EVALUATION_FAILED", trace_id,
+
+        log(
+            "WARN",
+            "AI_EVALUATION_FAILED",
+            trace_id,
             requestId=request_id,
             error=str(e)
         )
+
         try:
-            evaluation, model_id = evaluate_with_fallback(payload, trace_id)
+            evaluation, model_id = evaluate_with_fallback(
+                payload,
+                trace_id
+            )
+
         except Exception as fallback_error:
-            log("ERROR", "FALLBACK_EVALUATION_FAILED", trace_id,
+
+            log(
+                "ERROR",
+                "FALLBACK_EVALUATION_FAILED",
+                trace_id,
                 requestId=request_id,
                 error=str(fallback_error)
             )
+
             update_status_to_failed(
-                request_id, incident_id, trace_id,
-                error_reason=f"AI failed: {str(e)} | Fallback failed: {str(fallback_error)}"
+                request_id,
+                incident_id,
+                trace_id,
+                error_reason=(
+                    f"AI failed: {str(e)} | "
+                    f"Fallback failed: {str(fallback_error)}"
+                )
             )
+
             raise
 
-    priority_score = Decimal(str(evaluation["priority_score"]))
+    priority_score = Decimal(
+        str(evaluation["priority_score"])
+    )
+
     priority_level = evaluation["priority_level"]
+
     reason = evaluation.get("reason", "")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -388,7 +603,9 @@ def lambda_handler(event, context):
                     last_evaluated_at = :t,
                     #s = :status
             """,
-            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeNames={
+                "#s": "status"
+            },
             ExpressionAttributeValues={
                 ":ps": priority_score,
                 ":pl": priority_level,
@@ -400,7 +617,11 @@ def lambda_handler(event, context):
             },
             ConditionExpression="attribute_exists(request_id)"
         )
-        log("INFO", "RECORD_EVALUATED", trace_id,
+
+        log(
+            "INFO",
+            "RECORD_EVALUATED",
+            trace_id,
             requestId=request_id,
             incidentId=incident_id,
             evaluateId=evaluate_id,
@@ -408,20 +629,39 @@ def lambda_handler(event, context):
             priorityScore=float(priority_score),
             modelId=model_id
         )
+
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-        log("ERROR", "RECORD_NOT_FOUND", trace_id,
+
+        log(
+            "ERROR",
+            "RECORD_NOT_FOUND",
+            trace_id,
             requestId=request_id,
             message="ConditionalCheckFailed on EVALUATED update"
         )
-        raise ValueError(f"Record not found for request_id: {request_id}")
+
+        raise ValueError(
+            f"Record not found for request_id: {request_id}"
+        )
+
     except Exception as e:
-        log("ERROR", "DYNAMODB_UPDATE_FAILED", trace_id,
+
+        log(
+            "ERROR",
+            "DYNAMODB_UPDATE_FAILED",
+            trace_id,
             requestId=request_id,
             error=str(e)
         )
+
         raise
 
-    correlation_id = header.get("messageId") if header else event.get("correlationId")
+    correlation_id = (
+        header.get("messageId")
+        if header
+        else event.get("correlationId")
+    )
+
     sns_header = {
         "messageType": messageType,
         "traceId": trace_id,
@@ -429,28 +669,49 @@ def lambda_handler(event, context):
         "sentAt": now,
         "version": 1
     }
-    
+
     body = {
         "requestId": request_id,
         "incidentId": incident_id,
         "evaluateId": evaluate_id,
-        "requestType": payload.get("request_type") or payload.get("requestType"),
+        "requestType": (
+            payload.get("request_type")
+            or payload.get("requestType")
+        ),
         "priorityScore": float(priority_score),
         "priorityLevel": priority_level,
         "evaluateReason": reason,
         "lastEvaluatedAt": now,
         "description": payload.get("description"),
         "location": payload.get("location"),
-        "peopleCount": payload.get("people_count") or payload.get("peopleCount"),
-        "specialNeeds": payload.get("special_needs") or payload.get("specialNeeds", []),
     }
+
+    if is_resource_request:
+        body["items"] = payload.get("items", [])
+
+    else:
+        body["peopleCount"] = (
+            payload.get("people_count")
+            or payload.get("peopleCount")
+        )
+
+        body["specialNeeds"] = (
+            payload.get("special_needs")
+            or payload.get("specialNeeds", [])
+        )
+
+    if event_type == "CREATE":
+        body["incidentType"] = event["incidentType"]
 
     result = {
         "body": body,
         "header": sns_header
     }
 
-    log("INFO", "EVALUATE_WORKER_COMPLETED", trace_id,
+    log(
+        "INFO",
+        "EVALUATE_WORKER_COMPLETED",
+        trace_id,
         requestId=request_id,
         incidentId=incident_id,
         evaluateId=evaluate_id,
