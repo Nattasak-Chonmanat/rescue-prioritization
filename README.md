@@ -523,6 +523,96 @@ Accept: application/json
 
 ---
 
+### Message #4 — Resource Request Evaluate Flow
+
+| | |
+|---|---|
+| **Message Name** | `ResourceRequestCreated` (input) / `ResourceRequestEvaluateEvent` (output) |
+| **Style** | Event (Pub/Sub) |
+| **Producer** | Rescue Request Service |
+| **Consumer** | Rescue Request Prioritization Service |
+| **Channel** | `rescue.request.events.v1` → `rescue.prioritization.created.v1` |
+| **Version** | v1 |
+
+**คำอธิบาย:** ตัวอย่างไหลงานการรับคำขอจาก Resource Request Service (รูปแบบ `ResourceRequestCreated`) แล้วประมวลผลโดย Prioritization Service เพื่อส่งผลลัพธ์เป็น `ResourceRequestEvaluateEvent` กลับไปยังระบบอื่น ๆ ที่สนใจ
+
+#### Example Input (จาก Resource Request Service)
+
+```json
+{
+  "body": {
+    "requestId": "d2f9e6a1-6b7d-4d9c-9f7f-1a2b3c4d5e6f",
+    "incidentId": "123e4567-e89b-12d3-a456-426614174000",
+    "requestType": "flood_rescue",
+    "description": "Need rescue boat and emergency food supplies for trapped residents.",
+    "peopleCount": 1,
+    "specialNeeds": [],
+    "items": [],
+    "location": {
+      "latitude": 13.7697,
+      "longitude": 100.5683,
+      "province": null,
+      "district": null,
+      "subdistrict": null,
+      "addressLine": "99 ถนนรัชดาภิเษก แขวงดินแดง เขตดินแดง กรุงเทพฯ"
+    },
+    "submittedAt": "2026-05-08T14:42:04.735Z"
+  },
+  "header": {
+    "messageType": "ResourceRequestCreated",
+    "messageId": "fa3e5387-75fa-4a63-8084-d35b0b8ebc61",
+    "sentAt": "2026-05-08T14:42:04.735Z",
+    "traceId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "version": 1
+  }
+}
+```
+
+#### Example Output (จาก Prioritization Service)
+
+```json
+{
+  "body": {
+    "requestId": "d2f9e6a1-6b7d-4d9c-9f7f-1a2b3c4d5e6f",
+    "incidentId": "123e4567-e89b-12d3-a456-426614174000",
+    "evaluateId": "6d6045ef-6f32-40e6-a966-68e8e306a493",
+    "requestType": "flood_rescue",
+    "priorityScore": 0.95,
+    "priorityLevel": "CRITICAL",
+    "evaluateReason": "Request involves trapped residents needing immediate evacuation via rescue boat, indicating an active life-threatening flood situation with direct risk to human life.",
+    "lastEvaluatedAt": "2026-05-08T14:42:44.640048+00:00",
+    "description": "Need rescue boat and emergency food supplies for trapped residents.",
+    "location": {
+      "latitude": 13.7697,
+      "longitude": 100.5683,
+      "locationDetails": null,
+      "province": null,
+      "district": null,
+      "subdistrict": null,
+      "addressLine": "99 ถนนรัชดาภิเษก แขวงดินแดง เขตดินแดง กรุงเทพฯ"
+    },
+    "items": [],
+    "incidentType": null
+  },
+  "header": {
+    "messageType": "ResourceRequestEvaluateEvent",
+    "traceId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "correlationId": "fa3e5387-75fa-4a63-8084-d35b0b8ebc61",
+    "sentAt": "2026-05-08T14:42:44.640048+00:00",
+    "version": 1
+  }
+}
+```
+
+#### Validation Rules (สรุป)
+1. `incidentId` ต้องไม่ว่างและเป็น UUID
+2. `submittedAt` ต้องเป็น ISO-8601 datetime
+3. `messageId` ต้อง Unique (ใช้เป็น idempotency key)
+4. `location` ต้องมี `latitude` และ `longitude`
+5. `priorityScore` ต้องอยู่ในช่วง 0–1 (สำหรับผลลัพธ์)
+6. `evaluateId` ต้องเป็น UUID (สำหรับผลลัพธ์)
+
+
 ## 11. Service Data
 
 ### Prioritization Records (Owned)
