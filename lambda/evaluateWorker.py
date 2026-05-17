@@ -49,76 +49,154 @@ def evaluate_with_ai(payload, trace_id, is_resource_request=False):
 
     if is_resource_request:
         prompt = f"""
-        You are an emergency resource request prioritization system.
-        You MUST return valid JSON only. No markdown, no explanation outside JSON.
+        You are an emergency resource request prioritization AI used in a real disaster response system.
 
-        Evaluate how urgent and critical this resource request is
-        based on:
-        - severity described in the request
-        - medical urgency
-        - rescue operation impact
-        - requested resources/items
-        - risk to human life
-        - scale of impact
+        Your task is to evaluate how urgent and critical this resource request is.
 
-        Return exactly this format:
-        {{
-          "priority_score": <float 0.0-1.0>,
-          "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
-          "reason": <brief explanation in English>
-        }}
-        
-        # --- Priority Mapping ---
-        if score >= 0.75:
-            priority_level = "CRITICAL"
+        IMPORTANT RULES:
+        - Return VALID JSON ONLY.
+        - No markdown.
+        - No explanation outside JSON.
+        - Never generate random scores.
+        - Be realistic and consistent.
+        - Prioritize requests that directly impact human survival and active rescue operations.
+        - Requests for life-saving medical supplies, rescue equipment, evacuation support, or critical infrastructure support should receive HIGH or CRITICAL scores.
+        - General logistics or administrative requests should NOT become CRITICAL.
 
-        elif score >= 0.50:
-            priority_level = "HIGH"
+        EVALUATION FACTORS (ordered by importance):
+        1. Immediate risk to human life
+        2. Medical urgency
+        3. Impact on active rescue operations
+        4. Time sensitivity
+        5. Scale of affected population
+        6. Criticality of requested resources
+        7. Environmental danger
 
-        elif score >= 0.25:
-            priority_level = "NORMAL"
+        PRIORITY GUIDELINES:
 
-        else:
-            priority_level = "LOW"
+        CRITICAL (0.75 - 1.00)
+        Use when:
+        - Resources are urgently needed to save lives
+        - Active rescue operations depend on the resources
+        - Emergency medical supplies are required immediately
+        - Rescue boats, oxygen, blood, ventilators, emergency medicine, or evacuation equipment are critically needed
+        - Delays may directly cause deaths
+
+        HIGH (0.50 - 0.74)
+        Use when:
+        - Serious operational impact
+        - Large affected population
+        - Urgent evacuation or shelter support needed
+        - Food/water shortages affecting vulnerable groups
+        - Important medical or rescue support required soon
+
+        NORMAL (0.25 - 0.49)
+        Use when:
+        - Standard disaster support requests
+        - Non-critical supply shortages
+        - General operational assistance
+        - Stable situations requiring support
+
+        LOW (0.00 - 0.24)
+        Use when:
+        - Administrative or non-urgent requests
+        - Replacement or convenience requests
+        - No immediate operational or medical impact
+
+        SCORING CONSISTENCY RULES:
+        - Life-saving medical resources should usually score >= 0.75
+        - Rescue operation equipment should usually score >= 0.60
+        - Requests affecting vulnerable populations should increase severity
+        - Large-scale impact should increase severity
+        - Non-urgent logistics should remain below 0.50
 
         Resource Request Details:
         - Description: {payload.get("description")}
         - Location: {payload.get("location")}
         - Request Type: {payload.get("request_type") or payload.get("requestType")}
         - Items: {payload.get("items", [])}
+
+        Return EXACTLY this JSON format:
+        {{
+        "priority_score": <float between 0.0 and 1.0>,
+        "priority_level": "<LOW | NORMAL | HIGH | CRITICAL>",
+        "reason": "<short factual explanation in English>"
+        }}
         """
 
     else:
         prompt = f"""
-        You are an emergency rescue prioritization system.
-        You MUST return valid JSON only. No markdown, no explanation outside JSON.
+        You are an emergency rescue prioritization AI used in a real disaster management system.
 
-        Return exactly this format:
-        {{
-          "priority_score": <float 0.0-1.0>,
-          "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
-          "reason": <brief explanation in English>
-        }}
-        
-        # --- Priority Mapping ---
-        if score >= 0.75:
-            priority_level = "CRITICAL"
+        Your task is to evaluate rescue urgency and assign a priority score accurately and consistently.
 
-        elif score >= 0.50:
-            priority_level = "HIGH"
+        IMPORTANT RULES:
+        - Return VALID JSON ONLY.
+        - No markdown.
+        - No explanation outside JSON.
+        - Be conservative and realistic.
+        - Prioritize immediate risk to human life above all other factors.
+        - Requests involving trapped people, unconscious victims, drowning, fire, inability to breathe, severe injuries, rising flood water, or immobile patients should receive HIGH or CRITICAL scores.
+        - Lack of food/water alone should NOT become CRITICAL unless vulnerable people are involved.
+        - Never generate random scores.
 
-        elif score >= 0.25:
-            priority_level = "NORMAL"
+        SCORING GUIDELINES:
 
-        else:
-            priority_level = "LOW"
+        CRITICAL (0.75 - 1.00)
+        Use when:
+        - Immediate threat to life
+        - People trapped or drowning
+        - Fire or collapse
+        - Severe medical emergency
+        - Unconscious / cannot breathe
+        - Bedridden patients in danger
+        - Rising floodwaters with no escape
+        - Multiple vulnerable victims
 
-        Request details:
+        HIGH (0.50 - 0.74)
+        Use when:
+        - Serious risk but not immediately fatal
+        - Elderly / pregnant / disabled people stranded
+        - Medical needs worsening
+        - Evacuation urgently needed
+        - Large affected group
+
+        NORMAL (0.25 - 0.49)
+        Use when:
+        - Situation requires assistance
+        - Limited danger
+        - Stable medical condition
+        - Supply shortages
+        - Minor injuries
+
+        LOW (0.00 - 0.24)
+        Use when:
+        - Non-urgent support
+        - Informational requests
+        - No direct danger
+
+        SCORING FACTORS:
+        1. Risk to life (MOST IMPORTANT)
+        2. Medical severity
+        3. Mobility limitations
+        4. Number of affected people
+        5. Vulnerability (children, elderly, pregnant, disabled)
+        6. Environmental danger
+        7. Urgency implied in description
+
+        Request Details:
         - People count: {payload.get("people_count") or payload.get("peopleCount")}
         - Special needs: {payload.get("special_needs") or payload.get("specialNeeds", [])}
         - Description: {payload.get("description")}
         - Location: {payload.get("location")}
         - Request Type: {payload.get("request_type") or payload.get("requestType")}
+
+        Return EXACTLY this JSON format:
+        {{
+        "priority_score": <float between 0.0 and 1.0>,
+        "priority_level": "<LOW | NORMAL | HIGH | CRITICAL>",
+        "reason": "<short factual explanation>"
+        }}
         """
 
     log(
