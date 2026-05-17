@@ -88,7 +88,8 @@ def lambda_handler(event, context):
     print("EVENT:", json.dumps(event))
 
     # --- Path Param ---
-    incident_id = event.get("pathParameters", {}).get("incident_id")
+    # incident_id = event.get("pathParameters", {}).get("incident_id")
+    incident_id = (event.get("pathParameters") or {}).get("incident_id")
     if not incident_id:
         return response(400, {"message": "incident_id is required"})
 

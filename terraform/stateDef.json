@@ -40,7 +40,7 @@
                         "Resource": "arn:aws:states:::lambda:invoke",
                         "Output": "{% $states.result.Payload %}",
                         "Arguments": {
-                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:createEventHandler:$LATEST",
+                            "FunctionName": "<FMI_1>:$LATEST",
                             "Payload": "{% $states.input %}"
                         },
                         "Retry": [
@@ -80,7 +80,7 @@
                         "Resource": "arn:aws:states:::lambda:invoke",
                         "Output": "{% $states.result.Payload %}",
                         "Arguments": {
-                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:updateEventHandler:$LATEST",
+                            "FunctionName": "<FMI_2>:$LATEST",
                             "Payload": "{% $states.input %}"
                         },
                         "Retry": [
@@ -135,7 +135,7 @@
                         "Type": "Task",
                         "Resource": "arn:aws:states:::lambda:invoke",
                         "Arguments": {
-                            "FunctionName": "arn:aws:lambda:us-east-1:955468203539:function:evaluateWorker:$LATEST",
+                            "FunctionName": "<FMI_3>:$LATEST",
                             "Payload": "{% $states.input %}"
                         },
                         "Output": "{% $states.result.Payload %}",
@@ -176,7 +176,7 @@
                         "Resource": "arn:aws:states:::sns:publish",
                         "Arguments": {
                             "Message": "{% $states.input %}",
-                            "TopicArn": "arn:aws:sns:us-east-1:955468203539:rescue-prioritization-events-v1"
+                            "TopicArn": "<FMI_4>"
                         },
                         "Next": "Publish  Event Success"
                     },
@@ -187,7 +187,7 @@
                         "Type": "Task",
                         "Resource": "arn:aws:states:::sqs:sendMessage",
                         "Arguments": {
-                            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/955468203539/rescue-request-created-dlq",
+                            "QueueUrl": "<FMI_5>",
                             "MessageBody": "{% $string($states.input) %}",
                             "MessageAttributes": {
                                 "stage": {
