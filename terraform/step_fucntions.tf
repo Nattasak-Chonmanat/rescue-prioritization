@@ -1,228 +1,256 @@
+locals {
+  state_machine_definition = jsonencode({
+    Comment      = "Rescue Request Prioritization Pipeline"
+    StartAt      = "Process Messages"
+    QueryLanguage = "JSONata"
+    States = {
+      "Process Messages" = {
+        Type  = "Map"
+        Items = "{% $states.input %}"
+        ItemProcessor = {
+          ProcessorConfig = {
+            Mode = "INLINE"
+          }
+          StartAt = "Event Handler"
+          States = {
+            "Event Handler" = {
+              Type   = "Pass"
+              Output = "{% $parse($parse($states.input.body).Message) %}"
+              Next   = "Check Event Type"
+            }
+            "Check Event Type" = {
+              Type = "Choice"
+              Choices = [
+                {
+                  Condition = "{% $states.input.header.eventType = 'rescue-request.created' or $states.input.header.messageType = 'ResourceRequestCreated' %}"
+                  Next      = "Create Event Handler"
+                },
+                {
+                  Condition = "{% $states.input.header.eventType = 'rescue-request.citizen-updated' %}"
+                  Next      = "Update Event Handler"
+                }
+              ]
+              Default = "Skip Message"
+            }
+            "Skip Message" = {
+              Type    = "Succeed"
+              Comment = "Not supported message type"
+            }
+            "Create Event Handler" = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Output   = "{% $states.result.Payload %}"
+              Arguments = {
+                FunctionName = "${aws_lambda_function.create_event_handler.arn}:$LATEST"
+                Payload      = "{% $states.input %}"
+              }
+              Retry = [
+                {
+                  ErrorEquals = [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ]
+                  IntervalSeconds = 1
+                  MaxAttempts     = 3
+                  BackoffRate     = 2
+                  JitterStrategy  = "FULL"
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  Next        = "Send To Dead Letter Queue"
+                  Output = {
+                    originalInput = "{% $states.input %}"
+                    error = {
+                      name        = "{% $states.errorOutput.Error %}"
+                      cause       = "{% $states.errorOutput.Cause %}"
+                      stage       = "CreateEventHandler"
+                      timestamp   = "{% $now() %}"
+                      executionId = "{% $states.context.Execution.Id %}"
+                    }
+                  }
+                }
+              ]
+              Next = "Check Duplicate"
+            }
+            "Update Event Handler" = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Output   = "{% $states.result.Payload %}"
+              Arguments = {
+                FunctionName = "${aws_lambda_function.update_event_handler.arn}:$LATEST"
+                Payload      = "{% $states.input %}"
+              }
+              Retry = [
+                {
+                  ErrorEquals = [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ]
+                  IntervalSeconds = 1
+                  MaxAttempts     = 3
+                  BackoffRate     = 2
+                  JitterStrategy  = "FULL"
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  Next        = "Send To Dead Letter Queue"
+                  Output = {
+                    originalInput = "{% $states.input %}"
+                    error = {
+                      name        = "{% $states.errorOutput.Error %}"
+                      cause       = "{% $states.errorOutput.Cause %}"
+                      stage       = "UpdateEventHandler"
+                      timestamp   = "{% $now() %}"
+                      executionId = "{% $states.context.Execution.Id %}"
+                    }
+                  }
+                }
+              ]
+              Next = "Evaluate Worker"
+            }
+            "Check Duplicate" = {
+              Type = "Choice"
+              Choices = [
+                {
+                  Condition = "{% $states.input.duplicate = true %}"
+                  Next      = "Duplicate End"
+                },
+                {
+                  Condition = "{% $states.input.duplicate = false %}"
+                  Next      = "Evaluate Worker"
+                }
+              ]
+            }
+            "Duplicate End" = {
+              Type = "Succeed"
+            }
+            "Evaluate Worker" = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Output   = "{% $states.result.Payload %}"
+              Arguments = {
+                FunctionName = "${aws_lambda_function.evaluate_worker.arn}:$LATEST"
+                Payload      = "{% $states.input %}"
+              }
+              Retry = [
+                {
+                  ErrorEquals = [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ]
+                  IntervalSeconds = 1
+                  MaxAttempts     = 3
+                  BackoffRate     = 2
+                  JitterStrategy  = "FULL"
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  Next        = "Send To Dead Letter Queue"
+                  Output = {
+                    originalInput = "{% $states.input %}"
+                    error = {
+                      name        = "{% $states.errorOutput.Error %}"
+                      cause       = "{% $states.errorOutput.Cause %}"
+                      stage       = "EvaluateWorker"
+                      timestamp   = "{% $now() %}"
+                      executionId = "{% $states.context.Execution.Id %}"
+                    }
+                  }
+                }
+              ]
+              Next = "Publish Evaluated Event"
+            }
+            "Publish Evaluated Event" = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::sns:publish"
+              Arguments = {
+                Message  = "{% $states.input %}"
+                TopicArn = aws_sns_topic.rescue_prioritization_events.arn
+              }
+              Next = "Publish Event Success"
+            }
+            "Publish Event Success" = {
+              Type = "Succeed"
+            }
+            "Send To Dead Letter Queue" = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::sqs:sendMessage"
+              Arguments = {
+                QueueUrl    = aws_sqs_queue.rescue_request_created_dlq.url
+                MessageBody = "{% $string($states.input) %}"
+                MessageAttributes = {
+                  stage = {
+                    DataType    = "String"
+                    StringValue = "{% $states.input.error.stage %}"
+                  }
+                  errorName = {
+                    DataType    = "String"
+                    StringValue = "{% $states.input.error.name %}"
+                  }
+                  executionId = {
+                    DataType    = "String"
+                    StringValue = "{% $states.input.error.executionId %}"
+                  }
+                }
+              }
+              Next = "Fail"
+            }
+            "Fail" = {
+              Type = "Fail"
+            }
+          }
+        }
+        End = true
+      }
+    }
+  })
+}
+
 # ---------------------------------------------------------------------------
-# REST API
+# SNS Topic
 # ---------------------------------------------------------------------------
-resource "aws_api_gateway_rest_api" "prioritization_api" {
-  name = "prioritization-api"
+resource "aws_sns_topic" "rescue_prioritization_events" {
+  name = "rescue-prioritization-events-v1"
 
   tags = {
-    Name = "prioritization-api"
+    Name = "rescue-prioritization-events-v1"
   }
 }
 
 # ---------------------------------------------------------------------------
-# Resources
+# Step Functions — Express Workflow
 # ---------------------------------------------------------------------------
+resource "aws_sfn_state_machine" "prioritization_state_machine" {
+  name     = "PrioritizationStateMachine"
+  type     = "EXPRESS"
+  role_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
 
-# /prioritizations
-resource "aws_api_gateway_resource" "prioritizations" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  parent_id   = aws_api_gateway_rest_api.prioritization_api.root_resource_id
-  path_part   = "prioritizations"
-}
-
-# /v1/prioritizations/incident
-resource "aws_api_gateway_resource" "incident" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  parent_id   = aws_api_gateway_resource.prioritizations.id
-  path_part   = "incident"
-}
-
-# /v1/prioritizations/incident/{incident_id}
-resource "aws_api_gateway_resource" "incident_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  parent_id   = aws_api_gateway_resource.incident.id
-  path_part   = "{incident_id}"
-}
-
-# /v1/prioritizations/request
-resource "aws_api_gateway_resource" "request" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  parent_id   = aws_api_gateway_resource.prioritizations.id
-  path_part   = "request"
-}
-
-# /v1/prioritizations/request/{request_id}
-resource "aws_api_gateway_resource" "request_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  parent_id   = aws_api_gateway_resource.request.id
-  path_part   = "{request_id}"
-}
-
-# ---------------------------------------------------------------------------
-# GET /v1/prioritizations/incident/{incident_id}
-# ---------------------------------------------------------------------------
-resource "aws_api_gateway_method" "get_by_incident_id" {
-  rest_api_id   = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id   = aws_api_gateway_resource.incident_id.id
-  http_method   = "GET"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "get_by_incident_id" {
-  rest_api_id             = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id             = aws_api_gateway_resource.incident_id.id
-  http_method             = aws_api_gateway_method.get_by_incident_id.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.get_prior_by_incident_id.invoke_arn
-}
-
-resource "aws_lambda_permission" "apigw_get_by_incident_id" {
-  statement_id  = "AllowAPIGatewayInvokeGetByIncidentId"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.get_prior_by_incident_id.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.prioritization_api.execution_arn}/*/*"
-}
-
-# CORS — OPTIONS /v1/prioritizations/incident/{incident_id}
-resource "aws_api_gateway_method" "options_incident_id" {
-  rest_api_id   = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id   = aws_api_gateway_resource.incident_id.id
-  http_method   = "OPTIONS"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "options_incident_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.incident_id.id
-  http_method = aws_api_gateway_method.options_incident_id.http_method
-  type        = "MOCK"
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
-}
-
-resource "aws_api_gateway_method_response" "options_incident_id_200" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.incident_id.id
-  http_method = aws_api_gateway_method.options_incident_id.http_method
-  status_code = "200"
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = true
-    "method.response.header.Access-Control-Allow-Methods" = true
-    "method.response.header.Access-Control-Allow-Origin"  = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "options_incident_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.incident_id.id
-  http_method = aws_api_gateway_method.options_incident_id.http_method
-  status_code = "200"
-
-  depends_on = [aws_api_gateway_method_response.options_incident_id_200]
-
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,OPTIONS'"
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# GET /v1/prioritizations/request/{request_id}
-# ---------------------------------------------------------------------------
-resource "aws_api_gateway_method" "get_by_request_id" {
-  rest_api_id   = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id   = aws_api_gateway_resource.request_id.id
-  http_method   = "GET"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "get_by_request_id" {
-  rest_api_id             = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id             = aws_api_gateway_resource.request_id.id
-  http_method             = aws_api_gateway_method.get_by_request_id.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.get_prior_by_request_id.invoke_arn
-}
-
-resource "aws_lambda_permission" "apigw_get_by_request_id" {
-  statement_id  = "AllowAPIGatewayInvokeGetByRequestId"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.get_prior_by_request_id.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.prioritization_api.execution_arn}/*/*"
-}
-
-# CORS — OPTIONS /v1/prioritizations/request/{request_id}
-resource "aws_api_gateway_method" "options_request_id" {
-  rest_api_id   = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id   = aws_api_gateway_resource.request_id.id
-  http_method   = "OPTIONS"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "options_request_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.request_id.id
-  http_method = aws_api_gateway_method.options_request_id.http_method
-  type        = "MOCK"
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
-}
-
-resource "aws_api_gateway_method_response" "options_request_id_200" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.request_id.id
-  http_method = aws_api_gateway_method.options_request_id.http_method
-  status_code = "200"
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = true
-    "method.response.header.Access-Control-Allow-Methods" = true
-    "method.response.header.Access-Control-Allow-Origin"  = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "options_request_id" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
-  resource_id = aws_api_gateway_resource.request_id.id
-  http_method = aws_api_gateway_method.options_request_id.http_method
-  status_code = "200"
-
-  depends_on = [aws_api_gateway_method_response.options_request_id_200]
-
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,OPTIONS'"
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Deployment & Stage
-# ---------------------------------------------------------------------------
-resource "aws_api_gateway_deployment" "prioritization_api" {
-  rest_api_id = aws_api_gateway_rest_api.prioritization_api.id
+  definition = local.state_machine_definition
 
   depends_on = [
-    aws_api_gateway_integration.get_by_incident_id,
-    aws_api_gateway_integration.get_by_request_id,
-    aws_api_gateway_integration.options_incident_id,
-    aws_api_gateway_integration.options_request_id,
+    aws_lambda_function.create_event_handler,
+    aws_lambda_function.update_event_handler,
+    aws_lambda_function.evaluate_worker,
   ]
 
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_api_gateway_stage" "v1" {
-  rest_api_id   = aws_api_gateway_rest_api.prioritization_api.id
-  deployment_id = aws_api_gateway_deployment.prioritization_api.id
-  stage_name    = "v1"
-
   tags = {
-    Name = "prioritization-api-v1"
+    Name = "PrioritizationStateMachine"
   }
 }
 
 # ---------------------------------------------------------------------------
-# Output
+# Data sources
 # ---------------------------------------------------------------------------
-output "api_gateway_base_url" {
-  value = "https://${aws_api_gateway_rest_api.prioritization_api.id}.execute-api.${data.aws_caller_identity.current.account_id}.amazonaws.com/${aws_api_gateway_stage.v1.stage_name}"
-}
+data "aws_caller_identity" "current" {}

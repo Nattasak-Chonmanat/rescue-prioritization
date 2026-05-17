@@ -67,6 +67,19 @@ def evaluate_with_ai(payload, trace_id, is_resource_request=False):
           "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
           "reason": <brief explanation in English>
         }}
+        
+        # --- Priority Mapping ---
+        if score >= 0.75:
+            priority_level = "CRITICAL"
+
+        elif score >= 0.50:
+            priority_level = "HIGH"
+
+        elif score >= 0.25:
+            priority_level = "NORMAL"
+
+        else:
+            priority_level = "LOW"
 
         Resource Request Details:
         - Description: {payload.get("description")}
@@ -86,6 +99,19 @@ def evaluate_with_ai(payload, trace_id, is_resource_request=False):
           "priority_level": <"LOW" | "NORMAL" | "HIGH" | "CRITICAL">,
           "reason": <brief explanation in English>
         }}
+        
+        # --- Priority Mapping ---
+        if score >= 0.75:
+            priority_level = "CRITICAL"
+
+        elif score >= 0.50:
+            priority_level = "HIGH"
+
+        elif score >= 0.25:
+            priority_level = "NORMAL"
+
+        else:
+            priority_level = "LOW"
 
         Request details:
         - People count: {payload.get("people_count") or payload.get("peopleCount")}
